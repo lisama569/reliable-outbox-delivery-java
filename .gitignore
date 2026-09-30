@@ -25,3 +25,6 @@ build/
 
 ### local H2 data ###
 data/
+
+### run artifacts ###
+runlogs/

@@ -72,6 +72,10 @@ public class TestFailureControl {
         public final ConcurrentMap<String, Integer> retryFailuresByPrefix =
                 new ConcurrentHashMap<>();
 
+        /** eventId 前缀 -> 前多少次消费注入不可重试失败。 */
+        public final ConcurrentMap<String, Integer> nonRetryFailuresByPrefix =
+                new ConcurrentHashMap<>();
+
         public final AtomicInteger sideEffectCount = new AtomicInteger(0);
 
         @Override
@@ -91,6 +95,14 @@ public class TestFailureControl {
                             "INJECTED_RETRYABLE_FAILURE#" + deliveryIndex);
                 }
             }
+            for (var entry : nonRetryFailuresByPrefix.entrySet()) {
+                if (eventId.startsWith(entry.getKey()) && deliveryIndex <= entry.getValue()) {
+                    log.error("[test-fault] eventId={} deliveryIndex={} injected NON-RETRYABLE "
+                            + "failure (prefix rule)", eventId, deliveryIndex);
+                    throw new NonRetryableDeliveryException(
+                            "INJECTED_NON_RETRYABLE_FAILURE#" + deliveryIndex);
+                }
+            }
             Integer nonRetryUntil = nonRetryFailures.get(eventId);
             if (nonRetryUntil != null && deliveryIndex <= nonRetryUntil) {
                 log.error("[test-fault] eventId={} deliveryIndex={} injected NON-RETRYABLE failure",
@@ -106,6 +118,10 @@ public class TestFailureControl {
 
         public void failEventsWithPrefix(String eventIdPrefix, int n) {
             retryFailuresByPrefix.put(eventIdPrefix, n);
+        }
+
+        public void failEventsWithNonRetryPrefix(String eventIdPrefix, int n) {
+            nonRetryFailuresByPrefix.put(eventIdPrefix, n);
         }
 
         public void failFirstNWithNonRetry(String eventId, int n) {

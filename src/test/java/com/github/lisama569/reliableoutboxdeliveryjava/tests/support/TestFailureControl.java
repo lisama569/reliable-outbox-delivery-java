@@ -3,13 +3,11 @@ package com.github.lisama569.reliableoutboxdeliveryjava.tests.support;
 import com.github.lisama569.reliableoutboxdeliveryjava.broker.NonRetryableDeliveryException;
 import com.github.lisama569.reliableoutboxdeliveryjava.broker.RetryableDeliveryException;
 import com.github.lisama569.reliableoutboxdeliveryjava.consumer.ConsumerFailureHook;
-import com.github.lisama569.reliableoutboxdeliveryjava.consumer.OrderEventHandler;
 import com.github.lisama569.reliableoutboxdeliveryjava.dispatch.DispatchInterceptors;
+import com.github.lisama569.reliableoutboxdeliveryjava.dispatch.ProcessKilledSimulated;
 import com.github.lisama569.reliableoutboxdeliveryjava.domain.OutboxEvent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.boot.ApplicationArguments;
-import org.springframework.boot.ApplicationRunner;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 
@@ -33,26 +31,18 @@ public class TestFailureControl {
     }
 
     @Bean
-    public ApplicationRunner wireFailureHook(OrderEventHandler handler, FailureState state) {
-        return new ApplicationRunner() {
-            @Override
-            public void run(ApplicationArguments args) {
-                handler.setFailureHook(state);
-            }
-        };
-    }
-
-    @Bean
     public DispatchInterceptors crashInterceptors(FailureState state) {
         return new DispatchInterceptors() {
             @Override
             public void beforeMarkDelivered(OutboxEvent event) {
                 int remaining = state.crashBeforeMarkDelivered.getAndDecrement();
                 if (remaining > 0) {
-                    log.warn("[test-fault] eventId={} simulated process crash AFTER consumer "
-                            + "side-effect but BEFORE DELIVERED mark", event.getEventId());
-                    throw new RetryableDeliveryException(
-                            "SIMULATED_PROCESS_CRASH_BEFORE_DELIVERED_MARK");
+                    log.warn("[test-fault] eventId={} simulated process KILL after consumer "
+                            + "side-effect but BEFORE DELIVERED mark; dispatcher thread "
+                            + "terminates now", event.getEventId());
+                    throw new ProcessKilledSimulated(
+                            "SIMULATED_PROCESS_KILL_BEFORE_DELIVERED_MARK eventId="
+                                    + event.getEventId());
                 }
             }
         };
@@ -78,6 +68,10 @@ public class TestFailureControl {
         /** eventId -> 前多少次消费注入不可重试失败。 */
         public final ConcurrentMap<String, Integer> nonRetryFailures = new ConcurrentHashMap<>();
 
+        /** eventId 前缀 -> 前多少次消费注入可重试失败。 */
+        public final ConcurrentMap<String, Integer> retryFailuresByPrefix =
+                new ConcurrentHashMap<>();
+
         public final AtomicInteger sideEffectCount = new AtomicInteger(0);
 
         @Override
@@ -88,6 +82,14 @@ public class TestFailureControl {
                         eventId, deliveryIndex);
                 throw new RetryableDeliveryException(
                         "INJECTED_RETRYABLE_FAILURE#" + deliveryIndex);
+            }
+            for (var entry : retryFailuresByPrefix.entrySet()) {
+                if (eventId.startsWith(entry.getKey()) && deliveryIndex <= entry.getValue()) {
+                    log.warn("[test-fault] eventId={} deliveryIndex={} injected RETRYABLE "
+                            + "failure (prefix rule)", eventId, deliveryIndex);
+                    throw new RetryableDeliveryException(
+                            "INJECTED_RETRYABLE_FAILURE#" + deliveryIndex);
+                }
             }
             Integer nonRetryUntil = nonRetryFailures.get(eventId);
             if (nonRetryUntil != null && deliveryIndex <= nonRetryUntil) {
@@ -100,6 +102,10 @@ public class TestFailureControl {
 
         public void failFirstNWithRetry(String eventId, int n) {
             retryFailures.put(eventId, n);
+        }
+
+        public void failEventsWithPrefix(String eventIdPrefix, int n) {
+            retryFailuresByPrefix.put(eventIdPrefix, n);
         }
 
         public void failFirstNWithNonRetry(String eventId, int n) {

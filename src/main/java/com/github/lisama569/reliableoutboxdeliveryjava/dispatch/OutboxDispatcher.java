@@ -29,7 +29,10 @@ public class OutboxDispatcher implements Runnable {
     private final OutboxProperties properties;
 
     private volatile boolean running;
+    private volatile boolean died;
+    private volatile String deathCause;
     private long lastReclaimMillis;
+    private Runnable onDied;
 
     public OutboxDispatcher(String workerId,
                             JdbcOutboxRepository repository,
@@ -46,12 +49,40 @@ public class OutboxDispatcher implements Runnable {
     }
 
     public void start() {
+        start(null);
+    }
+
+    public void start(Runnable deathCallback) {
+        this.onDied = deathCallback;
+        this.died = false;
+        this.deathCause = null;
         running = true;
         lastReclaimMillis = System.currentTimeMillis();
         Thread thread = new Thread(this, "outbox-dispatcher-" + workerId);
         thread.setDaemon(true);
+        thread.setUncaughtExceptionHandler((t, ex) -> onThreadDied(ex));
         thread.start();
         log.info("[dispatch] worker {} started", workerId);
+    }
+
+    public boolean isDied() {
+        return died;
+    }
+
+    public String getDeathCause() {
+        return deathCause;
+    }
+
+    private void onThreadDied(Throwable ex) {
+        died = true;
+        deathCause = ex.getMessage();
+        running = false;
+        log.error("[dispatch] worker {} thread terminated unexpectedly (simulated process "
+                + "kill): {}; its in-flight event will be reclaimed by a surviving worker",
+                workerId, ex.getMessage());
+        if (onDied != null) {
+            onDied.run();
+        }
     }
 
     public void stop() {
@@ -72,6 +103,8 @@ public class OutboxDispatcher implements Runnable {
                     sleep(pollMillis);
                 }
             } catch (RuntimeException e) {
+                // 普通错误只影响本轮循环；ProcessKilledSimulated 是 Error，不在这里捕获，
+                // 它会直接终止 worker 线程以模拟进程被杀。
                 log.error("[dispatch] worker {} loop error: {}", workerId, e.getMessage(), e);
                 sleep(pollMillis);
             }

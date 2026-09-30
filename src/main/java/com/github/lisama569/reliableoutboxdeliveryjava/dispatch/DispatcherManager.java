@@ -10,10 +10,16 @@ import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 启动多个并发的投递器实例。每个实例有唯一 workerId，
  * 它们并发轮询同一张 outbox 表，靠数据库原子领取互斥（同一事件不会被领取两次）。
+ *
+ * 某个 worker 线程异常终止（模拟所在进程被杀）时，管理器会在可见性超时后
+ * 用同一个 workerId 重新拉起一个 worker；它会通过孤儿回收接管未完成事件。
  */
 @Component
 public class DispatcherManager implements SmartLifecycle {
@@ -26,6 +32,7 @@ public class DispatcherManager implements SmartLifecycle {
     private final OutboxProperties properties;
     private final DispatchInterceptors interceptors;
     private final List<OutboxDispatcher> dispatchers = new ArrayList<>();
+    private ScheduledExecutorService supervisor;
     private volatile boolean running;
 
     public DispatcherManager(JdbcOutboxRepository repository,
@@ -44,7 +51,7 @@ public class DispatcherManager implements SmartLifecycle {
     }
 
     @Override
-    public void start() {
+    public synchronized void start() {
         if (running) {
             return;
         }
@@ -52,23 +59,49 @@ public class DispatcherManager implements SmartLifecycle {
             log.info("[dispatch] outbox dispatch disabled by configuration");
             return;
         }
+        supervisor = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "outbox-dispatcher-supervisor");
+            t.setDaemon(true);
+            return t;
+        });
         int count = Math.max(1, properties.getDispatcherInstances());
         for (int i = 1; i <= count; i++) {
-            String workerId = "worker-" + i;
-            OutboxDispatcher dispatcher = new OutboxDispatcher(workerId, repository, publisher,
-                    backoffPolicy, interceptors, properties);
-            dispatcher.start();
-            dispatchers.add(dispatcher);
+            launch("worker-" + i);
         }
         running = true;
         log.info("[dispatch] {} dispatcher instance(s) running", dispatchers.size());
     }
 
+    private synchronized void launch(String workerId) {
+        OutboxDispatcher dispatcher = new OutboxDispatcher(workerId, repository, publisher,
+                backoffPolicy, interceptors, properties);
+        dispatcher.start(() -> scheduleRestart(workerId));
+        dispatchers.add(dispatcher);
+    }
+
+    private void scheduleRestart(String workerId) {
+        long delayMs = properties.getVisibilityTimeout().toMillis()
+                + properties.getPollInterval().toMillis();
+        log.warn("[dispatch] scheduling failover restart of {} in {} ms", workerId, delayMs);
+        supervisor.schedule(() -> {
+            synchronized (this) {
+                if (!running) {
+                    return;
+                }
+                log.warn("[dispatch] failover: relaunching {}", workerId);
+                launch(workerId);
+            }
+        }, delayMs, TimeUnit.MILLISECONDS);
+    }
+
     @Override
-    public void stop() {
+    public synchronized void stop() {
+        running = false;
+        if (supervisor != null) {
+            supervisor.shutdownNow();
+        }
         dispatchers.forEach(OutboxDispatcher::stop);
         dispatchers.clear();
-        running = false;
     }
 
     @Override

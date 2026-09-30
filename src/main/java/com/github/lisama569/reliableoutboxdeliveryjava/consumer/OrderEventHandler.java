@@ -7,8 +7,10 @@ import com.github.lisama569.reliableoutboxdeliveryjava.broker.QueueMessage;
 import com.github.lisama569.reliableoutboxdeliveryjava.repo.JdbcConsumerRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -27,16 +29,13 @@ public class OrderEventHandler implements com.github.lisama569.reliableoutboxdel
     private final ObjectMapper objectMapper;
     private final ConcurrentMap<String, AtomicInteger> deliveryCounters = new ConcurrentHashMap<>();
 
-    private volatile ConsumerFailureHook failureHook;
+    @Autowired(required = false)
+    private volatile List<ConsumerFailureHook> failureHooks = List.of();
 
     public OrderEventHandler(JdbcConsumerRepository consumerRepository,
                              ObjectMapper objectMapper) {
         this.consumerRepository = consumerRepository;
         this.objectMapper = objectMapper;
-    }
-
-    public void setFailureHook(ConsumerFailureHook failureHook) {
-        this.failureHook = failureHook;
     }
 
     @Override
@@ -48,8 +47,8 @@ public class OrderEventHandler implements com.github.lisama569.reliableoutboxdel
         log.info("[consumer] eventId={} deliveryIndex={} type={} received",
                 eventId, deliveryIndex, message.getEventType());
 
-        if (failureHook != null) {
-            failureHook.checkDelivery(eventId, deliveryIndex);
+        if (failureHooks != null) {
+            failureHooks.forEach(hook -> hook.checkDelivery(eventId, deliveryIndex));
         }
 
         String orderNo = extractOrderNo(message.getPayload());
